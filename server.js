@@ -13,7 +13,7 @@ const supabase = createClient(
 // WebSocket server
 const wss = new WebSocketServer({ port: process.env.PORT || 8080 });
 
-// Map visitorId -> Set of WebSocket clients
+// Map conversationId -> Set of WebSocket clients
 const subscribers = new Map();
 
 // Authenticate visitor token
@@ -26,53 +26,77 @@ function verifyVisitorToken(token) {
   }
 }
 
+// Check if visitor is part of conversation
+async function isVisitorInConversation(visitorId, conversationId) {
+  const { data, error } = await supabase
+    .from('conversations')
+    .select('id')
+    .eq('id', conversationId)
+    .eq('visitor_id', visitorId)
+    .single();
+
+  if (error || !data) return false;
+  return true;
+}
+
 // Handle connections
-wss.on('connection', (ws, req) => {
-  // Expect visitor token in query string: ?token=...
-  const url = new URL(req.url, 'http://localhost');
-  const token = url.searchParams.get('token');
-  const visitorId = verifyVisitorToken(token);
+wss.on('connection', async (ws, req) => {
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    const token = url.searchParams.get('token');
+    const conversationId = url.searchParams.get('conversation_id');
 
-  if (!visitorId) {
-    ws.send(JSON.stringify({ error: 'Invalid visitor token' }));
-    return ws.close();
+    if (!token || !conversationId) {
+      ws.send(JSON.stringify({ error: 'Token and conversation_id required' }));
+      return ws.close();
+    }
+
+    const visitorId = verifyVisitorToken(token);
+    if (!visitorId) {
+      ws.send(JSON.stringify({ error: 'Invalid visitor token' }));
+      return ws.close();
+    }
+
+    const authorized = await isVisitorInConversation(visitorId, conversationId);
+    if (!authorized) {
+      ws.send(JSON.stringify({ error: 'Not authorized for this conversation' }));
+      return ws.close();
+    }
+
+    console.log(`[WS] Visitor ${visitorId} connected to conversation ${conversationId}`);
+
+    // Add ws to subscribers map
+    if (!subscribers.has(conversationId)) subscribers.set(conversationId, new Set());
+    subscribers.get(conversationId).add(ws);
+
+    ws.on('close', () => {
+      subscribers.get(conversationId).delete(ws);
+      if (subscribers.get(conversationId).size === 0) subscribers.delete(conversationId);
+      console.log(`[WS] Visitor ${visitorId} disconnected from conversation ${conversationId}`);
+    });
+  } catch (err) {
+    console.error('WS connection error:', err);
+    ws.close();
   }
-
-  console.log(`[WS] Visitor connected: ${visitorId}`);
-
-  // Add ws to subscribers map
-  if (!subscribers.has(visitorId)) subscribers.set(visitorId, new Set());
-  subscribers.get(visitorId).add(ws);
-
-  ws.on('close', () => {
-    subscribers.get(visitorId).delete(ws);
-    if (subscribers.get(visitorId).size === 0) subscribers.delete(visitorId);
-    console.log(`[WS] Visitor disconnected: ${visitorId}`);
-  });
 });
 
-// Listen to all chats
+// Listen to chats and conversations
 supabase
-  .channel('all-chats')
+  .channel('conversation-chats')
   .on('postgres_changes', { event: '*', schema: 'public', table: 'chats' }, (payload) => {
-    const visitorId = payload.new.visitor_id;
-    const clients = subscribers.get(visitorId);
+    const conversationId = payload.new.conversations_id;
+    const clients = subscribers.get(conversationId);
     if (clients) {
       for (const ws of clients) ws.send(JSON.stringify({ type: 'chat', data: payload.new }));
     }
   })
-  .on(
-    'postgres_changes',
-    { event: '*', schema: 'public', table: 'conversations' },
-    (payload) => {
-      const visitorId = payload.new.visitor_id;
-      const clients = subscribers.get(visitorId);
-      if (clients) {
-        for (const ws of clients)
-          ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
-      }
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (payload) => {
+    const conversationId = payload.new.id;
+    const clients = subscribers.get(conversationId);
+    if (clients) {
+      for (const ws of clients) ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
     }
-  )
+  })
   .subscribe();
 
 console.log(`[WS] Server running on port ${process.env.PORT || 8080}`);
