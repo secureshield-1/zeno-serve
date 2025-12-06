@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 dotenv.config();
 
-// Supabase client with service-role (bypasses RLS)
+// Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -13,8 +13,8 @@ const supabase = createClient(
 // WebSocket server
 const wss = new WebSocketServer({ port: process.env.PORT || 8080 });
 
-// Set of all connected WebSocket clients
-const clients = new Set();
+// Map conversationId -> Set of WebSocket clients
+const subscribers = new Map();
 
 // Authenticate visitor token
 function verifyVisitorToken(token) {
@@ -30,6 +30,12 @@ function verifyVisitorToken(token) {
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
   const token = url.searchParams.get('token');
+  const conversationId = url.searchParams.get('conversation_id');
+
+  if (!conversationId) {
+    ws.send(JSON.stringify({ error: 'Missing conversation_id' }));
+    return ws.close();
+  }
 
   const visitorId = verifyVisitorToken(token);
   if (!visitorId) {
@@ -37,36 +43,43 @@ wss.on('connection', (ws, req) => {
     return ws.close();
   }
 
-  console.log(`[WS] Visitor connected: ${visitorId}`);
-  clients.add(ws);
+  console.log(`[WS] Visitor connected: ${visitorId}, conversation: ${conversationId}`);
+
+  // Add ws to subscribers map for the conversation
+  if (!subscribers.has(conversationId)) subscribers.set(conversationId, new Set());
+  subscribers.get(conversationId).add(ws);
 
   ws.on('close', () => {
-    clients.delete(ws);
-    console.log(`[WS] Visitor disconnected: ${visitorId}`);
+    subscribers.get(conversationId).delete(ws);
+    if (subscribers.get(conversationId).size === 0) subscribers.delete(conversationId);
+    console.log(`[WS] Visitor disconnected: ${visitorId}, conversation: ${conversationId}`);
   });
 });
 
-// Broadcast helper to all connected clients
-function broadcast(message) {
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      try {
-        client.send(JSON.stringify(message));
-      } catch (err) {
-        console.error('Failed to send message:', err);
+// Broadcast helper per conversation
+function broadcast(conversationId, message) {
+  const clients = subscribers.get(conversationId);
+  if (clients) {
+    clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(JSON.stringify(message));
+        } catch (err) {
+          console.error('Failed to send message:', err);
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 // Listen to chats table inserts
 supabase
-  .channel('chats-and-conversations')
+  .channel('conversations-updates')
   .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chats' }, (payload) => {
-    broadcast({ type: 'chat', data: payload.new });
+    broadcast(payload.new.conversations_id.toString(), { type: 'chat', data: payload.new });
   })
   .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (payload) => {
-    broadcast({ type: 'conversation', data: payload.new });
+    broadcast(payload.new.id.toString(), { type: 'conversation', data: payload.new });
   })
   .subscribe();
 
