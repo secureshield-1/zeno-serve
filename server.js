@@ -56,18 +56,30 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// Listen to chats table inserts (filtered by conversation_id)
+// Broadcast helper
+function broadcast(conversationId, message) {
+  const clients = subscribers.get(conversationId);
+  if (clients) {
+    clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(JSON.stringify(message));
+        } catch (err) {
+          console.error('Failed to send message:', err);
+        }
+      }
+    });
+  }
+}
+
+// Listen to chats table inserts
 supabase
   .channel('chats-by-conversation')
   .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chats' }, (payload) => {
-    const conversationId = payload.new.conversation_id;
-    const clients = subscribers.get(conversationId);
-    ws.send(JSON.stringify({ type: 'chat', data: payload.new }));
+    broadcast(payload.new.conversation_id, { type: 'chat', data: payload.new });
   })
   .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (payload) => {
-    const conversationId = payload.new.id;
-    const clients = subscribers.get(conversationId);
-    ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
+    broadcast(payload.new.id, { type: 'conversation', data: payload.new });
   })
   .subscribe();
 
