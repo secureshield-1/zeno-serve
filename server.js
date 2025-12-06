@@ -62,17 +62,12 @@ supabase
   .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chats' }, (payload) => {
     const conversationId = payload.new.conversation_id;
     const clients = subscribers.get(conversationId);
-    if (clients) {
-      for (const ws of clients) ws.send(JSON.stringify({ type: 'chat', data: payload.new }));
-    }
+    ws.send(JSON.stringify({ type: 'chat', data: payload.new }));
   })
   .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (payload) => {
     const conversationId = payload.new.id;
     const clients = subscribers.get(conversationId);
-    if (clients) {
-      for (const ws of clients)
-        ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
-    }
+    ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
   })
   .subscribe();
 
