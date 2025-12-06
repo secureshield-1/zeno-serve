@@ -26,65 +26,41 @@ function verifyVisitorToken(token) {
   }
 }
 
-// Check if visitor is part of conversation
-async function isVisitorInConversation(visitorId, conversationId) {
-  const { data, error } = await supabase
-    .from('conversations')
-    .select('id')
-    .eq('id', conversationId)
-    .eq('visitor_id', visitorId)
-    .single();
-
-  if (error || !data) return false;
-  return true;
-}
-
 // Handle connections
-wss.on('connection', async (ws, req) => {
-  try {
-    const url = new URL(req.url, 'http://localhost');
-    const token = url.searchParams.get('token');
-    const conversationId = url.searchParams.get('conversation_id');
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, 'http://localhost');
+  const token = url.searchParams.get('token');
+  const conversationId = url.searchParams.get('conversation_id');
 
-    if (!token || !conversationId) {
-      ws.send(JSON.stringify({ error: 'Token and conversation_id required' }));
-      return ws.close();
-    }
-
-    const visitorId = verifyVisitorToken(token);
-    if (!visitorId) {
-      ws.send(JSON.stringify({ error: 'Invalid visitor token' }));
-      return ws.close();
-    }
-
-    const authorized = await isVisitorInConversation(visitorId, conversationId);
-    if (!authorized) {
-      ws.send(JSON.stringify({ error: 'Not authorized for this conversation' }));
-      return ws.close();
-    }
-
-    console.log(`[WS] Visitor ${visitorId} connected to conversation ${conversationId}`);
-
-    // Add ws to subscribers map
-    if (!subscribers.has(conversationId)) subscribers.set(conversationId, new Set());
-    subscribers.get(conversationId).add(ws);
-
-    ws.on('close', () => {
-      subscribers.get(conversationId).delete(ws);
-      if (subscribers.get(conversationId).size === 0) subscribers.delete(conversationId);
-      console.log(`[WS] Visitor ${visitorId} disconnected from conversation ${conversationId}`);
-    });
-  } catch (err) {
-    console.error('WS connection error:', err);
-    ws.close();
+  if (!conversationId) {
+    ws.send(JSON.stringify({ error: 'Missing conversation_id' }));
+    return ws.close();
   }
+
+  const visitorId = verifyVisitorToken(token);
+  if (!visitorId) {
+    ws.send(JSON.stringify({ error: 'Invalid visitor token' }));
+    return ws.close();
+  }
+
+  console.log(`[WS] Visitor connected: ${visitorId}, conversation: ${conversationId}`);
+
+  // Add ws to subscribers map for the conversation
+  if (!subscribers.has(conversationId)) subscribers.set(conversationId, new Set());
+  subscribers.get(conversationId).add(ws);
+
+  ws.on('close', () => {
+    subscribers.get(conversationId).delete(ws);
+    if (subscribers.get(conversationId).size === 0) subscribers.delete(conversationId);
+    console.log(`[WS] Visitor disconnected: ${visitorId}, conversation: ${conversationId}`);
+  });
 });
 
-// Listen to chats and conversations
+// Listen to chats table inserts (filtered by conversation_id)
 supabase
-  .channel('conversation-chats')
-  .on('postgres_changes', { event: '*', schema: 'public', table: 'chats' }, (payload) => {
-    const conversationId = payload.new.conversations_id;
+  .channel('chats-by-conversation')
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chats' }, (payload) => {
+    const conversationId = payload.new.conversation_id;
     const clients = subscribers.get(conversationId);
     if (clients) {
       for (const ws of clients) ws.send(JSON.stringify({ type: 'chat', data: payload.new }));
@@ -94,7 +70,8 @@ supabase
     const conversationId = payload.new.id;
     const clients = subscribers.get(conversationId);
     if (clients) {
-      for (const ws of clients) ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
+      for (const ws of clients)
+        ws.send(JSON.stringify({ type: 'conversation', data: payload.new }));
     }
   })
   .subscribe();
